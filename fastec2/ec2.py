@@ -282,14 +282,39 @@ class EC2():
         self.create_name(snid, name)
         return ami
 
-    def _launch_spec(self, ami, keyname, disksize, instancetype, secgroupid, iops=None):
+    def _launch_spec(self, ami, keyname, disksize, instancetype, secgroupid,
+                     subnetid=None, iops=None):
+        """
+        Builds a JSON/dict object that can be submitted to boto3's ec2.create_instances() method. Formatting must follow both boto3 docs and aws docs.
+
+        boto3 create_instances() docs:
+
+        https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ec2.html#EC2.ServiceResource.create_instances
+
+        aws ec2 api RunInstances docs:
+
+        https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_RunInstances.html
+        """
         assert self._describe('key_pairs', {'key-name':keyname}), 'key not found'
+
         ami = self.get_ami(ami)
-        ebs = ({'VolumeSize': disksize, 'VolumeType': 'io1', 'Iops': iops }
-                 if iops else {'VolumeSize': disksize, 'VolumeType': 'gp2'})
-        return { 'ImageId': ami.id, 'InstanceType': instancetype,
-            'SecurityGroupIds': [secgroupid], 'KeyName': keyname,
-            "BlockDeviceMappings": [{ "DeviceName": "/dev/sda1", "Ebs": ebs, }] }
+        if iops:
+            ebs = {'VolumeSize': disksize, 'VolumeType': 'io1', 'Iops': iops }
+        else:
+            ebs = {'VolumeSize': disksize, 'VolumeType': 'gp2'}
+
+        ec2_request = { 
+            'ImageId': ami.id, 
+            'InstanceType': instancetype,
+            'SecurityGroupIds': [secgroupid], 
+            'KeyName': keyname,
+            'BlockDeviceMappings': [{ "DeviceName": "/dev/sda1", "Ebs": ebs, }]
+        }
+
+        if subnetid:
+            ec2_request['SubnetId'] = subnetid
+        
+        return ec2_request
 
     def _get_request(self, srid):
         srs = self._describe('spot_instance_requests', {'spot-instance-request-id':srid})
@@ -305,8 +330,8 @@ class EC2():
     def remove_name(self, resource_id):
         self._ec2.delete_tags(Resources=[resource_id],Tags=[{"Key": 'Name'}])
 
-    def request_spot(self, name, ami, keyname, disksize, instancetype, secgroupid, iops=None):
-        spec = self._launch_spec(ami, keyname, disksize, instancetype, secgroupid, iops)
+    def request_spot(self, name, ami, keyname, disksize, instancetype, secgroupid, subnetid, iops=None):
+        spec = self._launch_spec(ami, keyname, disksize, instancetype, secgroupid, subnetid, iops)
         sr = result(self._ec2.request_spot_instances(
             LaunchSpecification=spec, InstanceInterruptionBehavior='stop', Type='persistent'))
         assert len(sr)==1, 'spot request failed'
@@ -321,8 +346,8 @@ class EC2():
         self.create_name(sr.id, name)
         return sr
 
-    def request_demand(self, ami, keyname, disksize, instancetype, secgroupid, iops=None):
-        spec = self._launch_spec(ami, keyname, disksize, instancetype, secgroupid, iops)
+    def request_demand(self, ami, keyname, disksize, instancetype, secgroupid, subnetid, iops=None):
+        spec = self._launch_spec(ami, keyname, disksize, instancetype, secgroupid, subnetid, iops)
         return self._ec2r.create_instances(MinCount=1, MaxCount=1, **spec)[0]
 
     def _wait_ssh(self, inst):
@@ -335,17 +360,35 @@ class EC2():
                 return inst
             except (ConnectionRefusedError,BlockingIOError): time.sleep(5)
 
-    def get_launch(self, name, ami, disksize, instancetype, keyname:str='default', secgroupname:str='ssh',
-                   iops:int=None, spot:bool=False):
+    def get_launch(self, name, ami, disksize, instancetype,
+                   keyname:str='default', 
+                   secgroupname:str='ssh',
+                   subnetid:str='',
+                   iops:int=None, 
+                   spot:bool=False):
         "Creates new instance `name` and returns `Instance` object"
         insts = self._describe('instances', {'tag:Name':name})
         assert not insts, 'name already exists'
-        secgroupid = self.get_secgroup(secgroupname).id
+        
+        secgroup = self.get_secgroup(secgroupname)
+        secgroupid = secgroup.id
+        secgroupvpc = secgroup.vpc_id
+
+        if subnetid == '':
+            # we pick the first subnet in specified vpc
+            subnet = self.resource('subnets', vpc_id = secgroupvpc)
+            subnetid = subnet.id
+        else:
+            # make sure the provided subnet id is legit
+            subnet = self.resource('subnets', subnet_id = subnetid)
+            subnetid = subnet.id
+
         if spot:
-            sr = self.request_spot(name, ami, keyname, disksize, instancetype, secgroupid, iops)
+            sr = self.request_spot(name, ami, keyname, disksize, instancetype, secgroupid, subnetid, iops)
             inst = self._ec2r.Instance(sr.instance_id)
         else:
-            inst = self.request_demand(ami, keyname, disksize, instancetype, secgroupid, iops)
+            inst = self.request_demand(ami, keyname, disksize, instancetype, secgroupid, subnetid, iops)
+
         self.waitfor('instance','running', inst.id)
         inst.load()
         self.create_name(inst.id, name)
@@ -356,8 +399,9 @@ class EC2():
     def ip(self, inst): return self.get_instance(inst).public_ip_address
 
     def launch(self, name, ami, disksize, instancetype, keyname:str='default',
-               secgroupname:str='ssh', iops:int=None, spot:bool=False):
-        print(self.get_launch(name, ami, disksize, instancetype, keyname, secgroupname, iops, spot))
+               secgroupname:str='ssh', subnetid:str='', iops:int=None, 
+               spot:bool=False):
+        print(self.get_launch(name, ami, disksize, instancetype, keyname, secgroupname, subnetid, iops, spot))
 
     def instance(self, inst:str):
         "Show `Instance` details for `inst`"

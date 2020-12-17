@@ -4,8 +4,14 @@ AWS EC2 computer management for regular folks...
 
 ## Installation
 
+Original:
+
+~~`$ pip install git+https://github.com/fastai/fastec2.git`~~
+
+To install from the current fork:
+
 ```bash
-$ pip install git+https://github.com/fastai/fastec2.git
+$ pip install git+https://github.com/mattmoehr/fastec2.git
 ```
 
 To add tab completion for your shell (replace *bash* with *fish* if you use the fish shell, although note as at Feb-2019 there are reports fish completions may be broken in the Google Fire library that this relies on):
